@@ -206,14 +206,16 @@ class MainTest(unittest.TestCase):
     def test_happy_path_prints_pretty_json(self):
         self._write_creds(int(time.time() * 1000) + 3_600_000)
         usage = {"five_hour": {"utilization": 7.0}}
-        with patch("claude_usage.urllib.request.urlopen") as mock_open, \
+        profile = {"organization": {"rate_limit_tier": "default_claude_max_20x"}}
+        with patch("claude_usage.urllib.request.urlopen",
+                   side_effect=[self._resp(usage), self._resp(profile)]), \
              patch("sys.stdout", new_callable=io.StringIO) as out:
-            mock_open.return_value = self._resp(usage)
             rc = claude_usage.main(["--credentials", str(self.path)])
         self.assertEqual(rc, 0)
         printed = json.loads(out.getvalue())
-        self.assertEqual(printed, usage)
-        self.assertIn('\n  "five_hour"', out.getvalue())
+        self.assertEqual(printed, {"profile": profile, "usage": usage})
+        self.assertIn('\n  "usage"', out.getvalue())
+        self.assertIn('\n  "profile"', out.getvalue())
 
     def test_missing_credentials_exits_2(self):
         with patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -224,12 +226,14 @@ class MainTest(unittest.TestCase):
     def test_401_triggers_refresh_and_retry(self):
         self._write_creds(int(time.time() * 1000) + 3_600_000)
         usage = {"seven_day": {"utilization": 1.0}}
+        profile = {"organization": {"rate_limit_tier": "default_claude_max_20x"}}
         responses = [
             urllib.error.HTTPError(url="x", code=401, msg="u", hdrs=None,
                                     fp=io.BytesIO(b"")),
             self._resp({"access_token": "new", "refresh_token": "new-r",
                         "expires_in": 60}),
             self._resp(usage),
+            self._resp(profile),
         ]
         def side_effect(req, *a, **kw):
             r = responses.pop(0)
@@ -240,7 +244,8 @@ class MainTest(unittest.TestCase):
              patch("sys.stdout", new_callable=io.StringIO) as out:
             rc = claude_usage.main(["--credentials", str(self.path)])
         self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out.getvalue()), usage)
+        self.assertEqual(json.loads(out.getvalue()),
+                         {"profile": profile, "usage": usage})
 
     def test_401_after_refresh_exits_5(self):
         self._write_creds(int(time.time() * 1000) + 3_600_000)
@@ -265,17 +270,20 @@ class MainTest(unittest.TestCase):
     def test_expired_token_refreshes_proactively(self):
         self._write_creds(int(time.time() * 1000) - 3_600_000)  # expired
         usage = {"five_hour": {"utilization": 0.0}}
+        profile = {"organization": {"rate_limit_tier": "default_claude_max_20x"}}
         responses = [
             self._resp({"access_token": "new", "refresh_token": "new-r",
                         "expires_in": 60}),
             self._resp(usage),
+            self._resp(profile),
         ]
         with patch("claude_usage.urllib.request.urlopen",
                    side_effect=responses), \
              patch("sys.stdout", new_callable=io.StringIO) as out:
             rc = claude_usage.main(["--credentials", str(self.path)])
         self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out.getvalue()), usage)
+        self.assertEqual(json.loads(out.getvalue()),
+                         {"profile": profile, "usage": usage})
 
 
 class FormatHumanTest(unittest.TestCase):

@@ -22,12 +22,20 @@ The script depends only on Python 3 and the standard library.
 claude-usage
 ```
 
-Output is the JSON body of `https://api.anthropic.com/api/oauth/usage`,
-verbatim, indented with two spaces. Pipe it into `jq`, parse it, do
-whatever you want with it.
+Output is a single JSON object with two top-level keys, each holding
+the verbatim response body of the corresponding upstream endpoint:
+
+- `profile` — `https://api.anthropic.com/api/oauth/profile`
+  (account + organization + application info, including
+  `rate_limit_tier`, `subscription_status`, `subscription_created_at`)
+- `usage` — `https://api.anthropic.com/api/oauth/usage`
+  (`five_hour`, `seven_day`, per-model breakdowns, `extra_usage`)
+
+Pipe it into `jq`, parse it, do whatever you want with it.
 
 ````bash
-claude-usage | jq '.five_hour.utilization'
+claude-usage | jq '.usage.five_hour.utilization'
+claude-usage | jq '.profile.organization.rate_limit_tier'
 ````
 
 ### Human-readable mode

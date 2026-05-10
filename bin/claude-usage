@@ -356,10 +356,8 @@ def main(argv=None):
             return EXIT_REFRESH_FAILED
 
     def _fetch_all(token):
-        # Profile is only needed for the human header; skip it in JSON
-        # mode to avoid a spurious extra HTTP request per invocation.
         data = fetch_usage(token)
-        profile = fetch_profile(token) if args.human else None
+        profile = fetch_profile(token)
         return data, profile
 
     try:
@@ -387,7 +385,7 @@ def main(argv=None):
     if args.human:
         print(format_human(data, profile=profile))
     else:
-        print(json.dumps(data, indent=2))
+        print(json.dumps({"profile": profile, "usage": data}, indent=2))
     return EXIT_OK
 
 
