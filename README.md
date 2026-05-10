@@ -41,8 +41,6 @@ Plan: Claude Max 20x  (active since 2026-03-01)
 
 5-hour session   [███░░░░░░░░░░░░░░░░░]  13%   resets in 45m
 7-day weekly     [██████████░░░░░░░░░░]  49%   resets in 2d 21h
-  Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   resets in 2d 21h
-  Opus (7d)      —                             no usage
 Extra credits    disabled
 ```
 
@@ -54,10 +52,13 @@ Lines shown:
 - `5-hour session` — the rolling 5-hour quota for the current Claude
   Max session.
 - `7-day weekly` — the rolling 7-day quota.
-- `Sonnet (7d)` / `Opus (7d)` — per-model 7-day usage. A line shows
-  `—` and `no usage` if you haven't used that model in the window.
 - `Extra credits` — `disabled` if the account has no extra-credits
   plan, otherwise `<percent>% of $<monthly_limit>`.
+
+Per-model breakdowns (`seven_day_sonnet`, `seven_day_opus`) are still
+present in the JSON output but are omitted from the human view: they
+have been observed to lag/stale behind the rolled-up `seven_day`
+number, so showing them risks misleading at-a-glance reads.
 
 The output is intended for terminals; if you need a stable, scriptable
 representation, use the default JSON form.

@@ -287,8 +287,6 @@ class FormatHumanTest(unittest.TestCase):
         data = {
             "five_hour": {"utilization": 10.0, "resets_at": "2026-05-10T03:00:00+00:00"},
             "seven_day": {"utilization": 48.0, "resets_at": "2026-05-12T00:00:00+00:00"},
-            "seven_day_sonnet": {"utilization": 9.0, "resets_at": "2026-05-12T00:00:00+00:00"},
-            "seven_day_opus": None,
             "extra_usage": {"is_enabled": False, "monthly_limit": None,
                             "used_credits": None, "utilization": None,
                             "currency": None},
@@ -296,8 +294,6 @@ class FormatHumanTest(unittest.TestCase):
         expected = (
             "5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   resets in 5h 0m\n"
             "7-day weekly     [██████████░░░░░░░░░░]  48%   resets in 2d 2h\n"
-            "  Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   resets in 2d 2h\n"
-            "  Opus (7d)      —                             no usage\n"
             "Extra credits    disabled"
         )
         self.assertEqual(claude_usage.format_human(data, now=now), expected)
@@ -322,20 +318,12 @@ class FormatHumanTest(unittest.TestCase):
         last_line = out.splitlines()[-1]
         self.assertEqual(last_line, "Extra credits    30% of $100")
 
-    def test_null_model_renders_no_usage(self):
+    def test_null_entry_renders_em_dash_no_usage(self):
         now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
-        data = {
-            "five_hour": None,
-            "seven_day": None,
-            "seven_day_sonnet": None,  # null model
-            "seven_day_opus": None,
-            "extra_usage": {"is_enabled": False},
-        }
-        out = claude_usage.format_human(data, now=now)
-        sonnet_line = [ln for ln in out.splitlines() if "Sonnet" in ln][0]
-        self.assertIn("—", sonnet_line)        # em-dash bar
-        self.assertIn("no usage", sonnet_line)
-        self.assertNotIn("%", sonnet_line)
+        line = claude_usage._render_row("Some label", None, now)
+        self.assertIn("—", line)        # em-dash bar
+        self.assertIn("no usage", line)
+        self.assertNotIn("%", line)
 
     def test_reset_in_minutes_format(self):
         now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)

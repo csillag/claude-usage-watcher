@@ -302,8 +302,6 @@ def format_human(data, profile=None, now=None):
     lines.extend([
         _render_row("5-hour session", data.get("five_hour"), now),
         _render_row("7-day weekly", data.get("seven_day"), now),
-        _render_row("  Sonnet (7d)", data.get("seven_day_sonnet"), now),
-        _render_row("  Opus (7d)", data.get("seven_day_opus"), now),
         _render_extra(data.get("extra_usage")),
     ])
     return "\n".join(lines)
