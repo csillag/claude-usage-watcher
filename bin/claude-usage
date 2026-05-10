@@ -16,6 +16,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
@@ -149,6 +150,98 @@ def refresh(path=DEFAULT_CREDENTIALS_PATH):
     return creds
 
 
+BAR_WIDTH = 20
+BAR_FILL = "█"   # █
+BAR_EMPTY = "░"  # ░
+LABEL_WIDTH = 17
+BAR_FIELD_WIDTH = BAR_WIDTH + 2  # 22, includes [ and ]
+
+
+def _humanize_reset(resets_at, now):
+    """Format the time until `resets_at` (ISO-8601 string) relative to `now`.
+
+    Returns "no usage" if resets_at is None, "reset" if past, otherwise
+    "in {N}m" / "in {H}h {M}m" / "in {D}d {H}h" using truncation.
+    """
+    if resets_at is None:
+        return "no usage"
+    s = resets_at
+    # datetime.fromisoformat in 3.11+ accepts trailing Z, but be defensive.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    reset_dt = datetime.fromisoformat(s)
+    if reset_dt.tzinfo is None:
+        reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    delta = reset_dt - now
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        return "reset"
+    minutes = total_seconds // 60
+    if minutes < 60:
+        return f"in {minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"in {hours}h {minutes % 60}m"
+    days = hours // 24
+    return f"in {days}d {hours % 24}h"
+
+
+def _render_bar(utilization):
+    """Render a 20-char bar of █/░ for a 0..100 utilization value."""
+    filled = round((utilization / 100.0) * BAR_WIDTH)
+    if filled < 0:
+        filled = 0
+    elif filled > BAR_WIDTH:
+        filled = BAR_WIDTH
+    return "[" + BAR_FILL * filled + BAR_EMPTY * (BAR_WIDTH - filled) + "]"
+
+
+def _render_row(label, entry, now):
+    """Render one row. `entry` is None or a dict with utilization+resets_at."""
+    if entry is None:
+        # Em-dash bar, blank pct, "no usage". Pad to align with present rows.
+        # Present row tail after label: bar(22) + " " + pct(>3) + "%" + "   " + reset
+        # = 22 + 1 + 3 + 1 + 3 = 30 chars before the status text.
+        # For null: "—" left-aligned to 22 + 1 + 3 spaces (pct) + 1 (no %) + 3 sep
+        em = "—"  # —
+        return f"{label:<{LABEL_WIDTH}}{em:<{BAR_FIELD_WIDTH}}        no usage"
+    util = entry.get("utilization") or 0
+    bar = _render_bar(util)
+    pct = round(util)
+    reset = _humanize_reset(entry.get("resets_at"), now)
+    return f"{label:<{LABEL_WIDTH}}{bar} {pct:>3}%   {reset}"
+
+
+def _render_extra(extra):
+    """Render the 'Extra credits' line."""
+    label = "Extra credits"
+    if not extra or not extra.get("is_enabled"):
+        return f"{label:<{LABEL_WIDTH}}disabled"
+    util = extra.get("utilization")
+    monthly = extra.get("monthly_limit")
+    currency = extra.get("currency") or "USD"
+    if util is None or monthly is None:
+        return f"{label:<{LABEL_WIDTH}}enabled"
+    symbol = "$" if currency == "USD" else currency + " "
+    return f"{label:<{LABEL_WIDTH}}{round(util)}% of {symbol}{monthly}"
+
+
+def format_human(data, now=None):
+    """Render usage `data` as a multi-line human-readable string."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    lines = [
+        _render_row("5-hour session", data.get("five_hour"), now),
+        _render_row("7-day weekly", data.get("seven_day"), now),
+        _render_row("  Sonnet (7d)", data.get("seven_day_sonnet"), now),
+        _render_row("  Opus (7d)", data.get("seven_day_opus"), now),
+        _render_extra(data.get("extra_usage")),
+    ]
+    return "\n".join(lines)
+
+
 EXIT_OK = 0
 EXIT_NO_CREDS = 2
 EXIT_REFRESH_FAILED = 3
@@ -174,6 +267,11 @@ def main(argv=None):
         "--credentials",
         default=str(DEFAULT_CREDENTIALS_PATH),
         help="Path to the Claude Code credentials JSON file.",
+    )
+    parser.add_argument(
+        "--human",
+        action="store_true",
+        help="Render a human-readable text report instead of JSON.",
     )
     args = parser.parse_args(argv)
     creds_path = Path(args.credentials)
@@ -214,7 +312,10 @@ def main(argv=None):
         print(str(e), file=sys.stderr)
         return EXIT_NETWORK
 
-    print(json.dumps(data, indent=2))
+    if args.human:
+        print(format_human(data))
+    else:
+        print(json.dumps(data, indent=2))
     return EXIT_OK
 
 
