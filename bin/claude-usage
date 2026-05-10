@@ -6,3 +6,36 @@ Claude Code uses), refreshes the access token if expired, GETs
 https://api.anthropic.com/api/oauth/usage, and prints the response body
 with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
 """
+
+import json
+import os
+from pathlib import Path
+
+DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+
+
+class CredentialsError(Exception):
+    """Raised when credentials cannot be loaded or parsed."""
+
+
+def load_credentials(path=DEFAULT_CREDENTIALS_PATH):
+    """Read the credentials file and return the claudeAiOauth dict.
+
+    Raises CredentialsError on missing file, malformed JSON, or missing
+    claudeAiOauth block.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise CredentialsError(
+            f"No credentials file at {path}. Run `claude` to authenticate first."
+        )
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise CredentialsError(f"Credentials file at {path} is malformed: {e}") from e
+    oauth = raw.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        raise CredentialsError(
+            f"Credentials file at {path} has no claudeAiOauth block."
+        )
+    return oauth
