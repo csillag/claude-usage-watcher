@@ -62,6 +62,9 @@ class IsExpiredTest(unittest.TestCase):
         creds = {"expiresAt": int(time.time() * 1000) + 90_000}
         self.assertFalse(claude_usage.is_expired(creds))
 
+    def test_missing_expiry_treated_as_expired(self):
+        self.assertTrue(claude_usage.is_expired({}))
+
 
 if __name__ == "__main__":
     unittest.main()
