@@ -30,13 +30,32 @@ whatever you want with it.
 claude-usage | jq '.five_hour.utilization'
 ````
 
+### Human-readable mode
+
 For an at-a-glance text report with ASCII bars and humanized reset
 times instead of JSON, pass `--human`:
 
-````bash
-claude-usage --human
-# 5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   in 4h 52m
-````
+```
+$ claude-usage --human
+5-hour session   [███░░░░░░░░░░░░░░░░░]  13%   resets in 45m
+7-day weekly     [██████████░░░░░░░░░░]  49%   resets in 2d 21h
+  Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   resets in 2d 21h
+  Opus (7d)      —                             no usage
+Extra credits    disabled
+```
+
+Lines shown:
+
+- `5-hour session` — the rolling 5-hour quota for the current Claude
+  Max session.
+- `7-day weekly` — the rolling 7-day quota.
+- `Sonnet (7d)` / `Opus (7d)` — per-model 7-day usage. A line shows
+  `—` and `no usage` if you haven't used that model in the window.
+- `Extra credits` — `disabled` if the account has no extra-credits
+  plan, otherwise `<percent>% of $<monthly_limit>`.
+
+The output is intended for terminals; if you need a stable, scriptable
+representation, use the default JSON form.
 
 Authentication uses the OAuth credentials Claude Code already stores at
 `~/.claude/.credentials.json`. If the access token is expired, the tool
