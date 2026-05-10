@@ -161,7 +161,8 @@ def _humanize_reset(resets_at, now):
     """Format the time until `resets_at` (ISO-8601 string) relative to `now`.
 
     Returns "no usage" if resets_at is None, "reset" if past, otherwise
-    "in {N}m" / "in {H}h {M}m" / "in {D}d {H}h" using truncation.
+    "resets in {N}m" / "resets in {H}h {M}m" / "resets in {D}d {H}h"
+    using truncation.
     """
     if resets_at is None:
         return "no usage"
@@ -180,12 +181,12 @@ def _humanize_reset(resets_at, now):
         return "reset"
     minutes = total_seconds // 60
     if minutes < 60:
-        return f"in {minutes}m"
+        return f"resets in {minutes}m"
     hours = minutes // 60
     if hours < 24:
-        return f"in {hours}h {minutes % 60}m"
+        return f"resets in {hours}h {minutes % 60}m"
     days = hours // 24
-    return f"in {days}d {hours % 24}h"
+    return f"resets in {days}d {hours % 24}h"
 
 
 def _render_bar(utilization):

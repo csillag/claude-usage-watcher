@@ -281,8 +281,8 @@ class MainTest(unittest.TestCase):
 class FormatHumanTest(unittest.TestCase):
     def test_renders_full_response(self):
         # now = 2026-05-09T22:00:00Z
-        # five_hour reset 5h later -> "in 5h 0m"
-        # seven_day reset 2d 2h later -> "in 2d 2h"
+        # five_hour reset 5h later -> "resets in 5h 0m"
+        # seven_day reset 2d 2h later -> "resets in 2d 2h"
         now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
         data = {
             "five_hour": {"utilization": 10.0, "resets_at": "2026-05-10T03:00:00+00:00"},
@@ -294,9 +294,9 @@ class FormatHumanTest(unittest.TestCase):
                             "currency": None},
         }
         expected = (
-            "5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   in 5h 0m\n"
-            "7-day weekly     [██████████░░░░░░░░░░]  48%   in 2d 2h\n"
-            "  Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   in 2d 2h\n"
+            "5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   resets in 5h 0m\n"
+            "7-day weekly     [██████████░░░░░░░░░░]  48%   resets in 2d 2h\n"
+            "  Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   resets in 2d 2h\n"
             "  Opus (7d)      —                             no usage\n"
             "Extra credits    disabled"
         )
@@ -342,7 +342,7 @@ class FormatHumanTest(unittest.TestCase):
         # 45 minutes from now
         resets_at = (now + timedelta(minutes=45)).isoformat()
         result = claude_usage._humanize_reset(resets_at, now)
-        self.assertEqual(result, "in 45m")
+        self.assertEqual(result, "resets in 45m")
 
     def test_reset_past_renders_reset(self):
         now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
@@ -356,7 +356,7 @@ class FormatHumanTest(unittest.TestCase):
         # 2 days, 19 hours from now
         resets_at = (now + timedelta(days=2, hours=19, minutes=30)).isoformat()
         result = claude_usage._humanize_reset(resets_at, now)
-        self.assertEqual(result, "in 2d 19h")
+        self.assertEqual(result, "resets in 2d 19h")
 
 
 class MainHumanFlagTest(unittest.TestCase):
