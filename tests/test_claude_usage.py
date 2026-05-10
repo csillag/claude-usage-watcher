@@ -1,9 +1,11 @@
+import io
 import json
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from tests.conftest import claude_usage
 
 
@@ -64,6 +66,55 @@ class IsExpiredTest(unittest.TestCase):
 
     def test_missing_expiry_treated_as_expired(self):
         self.assertTrue(claude_usage.is_expired({}))
+
+
+class FetchUsageTest(unittest.TestCase):
+    def _mock_response(self, body_dict):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body_dict).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_returns_parsed_json(self):
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response({"five_hour": {"utilization": 7.0}})
+            result = claude_usage.fetch_usage("tok-abc")
+            self.assertEqual(result["five_hour"]["utilization"], 7.0)
+
+    def test_sends_bearer_and_beta_header(self):
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response({})
+            claude_usage.fetch_usage("tok-abc")
+            req = mock_open.call_args[0][0]
+            self.assertEqual(req.get_header("Authorization"), "Bearer tok-abc")
+            self.assertEqual(req.get_header("Anthropic-beta"), "oauth-2025-04-20")
+
+    def test_401_raises_auth_error(self):
+        err = urllib.error.HTTPError(
+            url="x", code=401, msg="Unauthorized",
+            hdrs=None, fp=io.BytesIO(b"unauthorized"),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.AuthError):
+                claude_usage.fetch_usage("tok-abc")
+
+    def test_500_raises_fetch_error(self):
+        err = urllib.error.HTTPError(
+            url="x", code=500, msg="Server",
+            hdrs=None, fp=io.BytesIO(b"boom"),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.UsageFetchError):
+                claude_usage.fetch_usage("tok-abc")
+
+    def test_url_error_raises_fetch_error(self):
+        with patch(
+            "claude_usage.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("no dns"),
+        ):
+            with self.assertRaises(claude_usage.UsageFetchError):
+                claude_usage.fetch_usage("tok-abc")
 
 
 if __name__ == "__main__":

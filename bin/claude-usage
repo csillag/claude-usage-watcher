@@ -10,6 +10,8 @@ with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
 import json
 import os
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
@@ -55,3 +57,37 @@ def is_expired(creds, now=None):
     if expires_at_ms is None:
         return True
     return (expires_at_ms / 1000.0) - EXPIRY_SKEW_SECONDS <= now
+
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+BETA_HEADER = "oauth-2025-04-20"
+
+
+class AuthError(Exception):
+    """Raised on 401 from the usage endpoint (caller may retry after refresh)."""
+
+
+class UsageFetchError(Exception):
+    """Raised on any other HTTP or network error from the usage endpoint."""
+
+
+def fetch_usage(access_token):
+    """GET the usage endpoint and return the parsed JSON body."""
+    req = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "anthropic-beta": BETA_HEADER,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise AuthError(f"401 Unauthorized: {e.read().decode('utf-8', 'replace')}") from e
+        raise UsageFetchError(f"HTTP {e.code}: {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise UsageFetchError(f"Network error: {e.reason}") from e
+    return json.loads(body)
