@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import stat
 import tempfile
 import time
 import unittest
@@ -115,6 +117,63 @@ class FetchUsageTest(unittest.TestCase):
         ):
             with self.assertRaises(claude_usage.UsageFetchError):
                 claude_usage.fetch_usage("tok-abc")
+
+
+class RefreshTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+        self.path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
+                "expiresAt": 1,
+                "scopes": ["user:inference"],
+                "subscriptionType": "max",
+            }
+        }))
+        os.chmod(self.path, 0o600)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _mock_response(self, body):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_writes_new_tokens_to_file(self):
+        new_body = {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        }
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response(new_body)
+            updated = claude_usage.refresh(self.path)
+        self.assertEqual(updated["accessToken"], "new-access")
+        on_disk = json.loads(self.path.read_text())["claudeAiOauth"]
+        self.assertEqual(on_disk["accessToken"], "new-access")
+        self.assertEqual(on_disk["refreshToken"], "new-refresh")
+
+    def test_preserves_0600_permissions(self):
+        new_body = {"access_token": "a", "refresh_token": "r", "expires_in": 60}
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response(new_body)
+            claude_usage.refresh(self.path)
+        mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_refresh_failure_raises(self):
+        err = urllib.error.HTTPError(
+            url="x", code=400, msg="Bad",
+            hdrs=None, fp=io.BytesIO(b'{"error":"invalid_grant"}'),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.RefreshError):
+                claude_usage.refresh(self.path)
 
 
 if __name__ == "__main__":

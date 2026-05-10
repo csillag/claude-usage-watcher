@@ -9,6 +9,8 @@ with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
 
 import json
 import os
+import stat
+import tempfile
 import time
 import urllib.request
 import urllib.error
@@ -91,3 +93,76 @@ def fetch_usage(access_token):
     except urllib.error.URLError as e:
         raise UsageFetchError(f"Network error: {e.reason}") from e
     return json.loads(body)
+
+
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
+
+
+class RefreshError(Exception):
+    """Raised when the refresh-token exchange fails."""
+
+
+def refresh(path=DEFAULT_CREDENTIALS_PATH):
+    """Refresh the access token and atomically rewrite the credentials file.
+
+    Returns the updated claudeAiOauth dict.
+    """
+    path = Path(path)
+    raw = json.loads(path.read_text())
+    creds = raw["claudeAiOauth"]
+    refresh_token = creds["refreshToken"]
+
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        REFRESH_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RefreshError(
+            f"Refresh failed: HTTP {e.code} {e.reason}: "
+            f"{e.read().decode('utf-8', 'replace')}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RefreshError(f"Refresh failed: network: {e.reason}") from e
+
+    creds["accessToken"] = payload["access_token"]
+    creds["refreshToken"] = payload.get("refresh_token", refresh_token)
+    if "expires_at" in payload:
+        creds["expiresAt"] = int(payload["expires_at"])
+    else:
+        creds["expiresAt"] = int((time.time() + int(payload["expires_in"])) * 1000)
+    raw["claudeAiOauth"] = creds
+
+    _atomic_write(path, json.dumps(raw, indent=2))
+    return creds
+
+
+def _atomic_write(path, contents):
+    """Write `contents` to `path` atomically, preserving permissions."""
+    path = Path(path)
+    try:
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        existing_mode = 0o600
+    fd, tmp = tempfile.mkstemp(prefix=".credentials.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(contents)
+        os.chmod(tmp, existing_mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
