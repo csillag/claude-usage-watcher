@@ -37,6 +37,8 @@ times instead of JSON, pass `--human`:
 
 ```
 $ claude-usage --human
+Plan: Claude Max 20x  (active since 2026-03-01)
+
 5-hour session   [███░░░░░░░░░░░░░░░░░]  13%   resets in 45m
 7-day weekly     [██████████░░░░░░░░░░]  49%   resets in 2d 21h
   Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   resets in 2d 21h
@@ -46,6 +48,9 @@ Extra credits    disabled
 
 Lines shown:
 
+- `Plan: ...` — your subscription tier and status (only shown in
+  `--human` mode; the JSON output is unchanged from the upstream
+  endpoint).
 - `5-hour session` — the rolling 5-hour quota for the current Claude
   Max session.
 - `7-day weekly` — the rolling 7-day quota.

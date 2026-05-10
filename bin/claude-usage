@@ -65,6 +65,7 @@ def is_expired(creds, now=None):
 
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 BETA_HEADER = "oauth-2025-04-20"
 
 
@@ -78,8 +79,23 @@ class UsageFetchError(Exception):
 
 def fetch_usage(access_token):
     """GET the usage endpoint and return the parsed JSON body."""
+    return _oauth_get(USAGE_URL, access_token)
+
+
+def fetch_profile(access_token):
+    """GET the profile endpoint and return the parsed JSON body.
+
+    Same auth and beta header as fetch_usage. 401 -> AuthError; other
+    HTTP/network errors -> UsageFetchError (the user-visible failure
+    shape is identical to a usage fetch failure).
+    """
+    return _oauth_get(PROFILE_URL, access_token)
+
+
+def _oauth_get(url, access_token):
+    """GET `url` with OAuth bearer + beta header, return parsed JSON."""
     req = urllib.request.Request(
-        USAGE_URL,
+        url,
         headers={
             "Authorization": f"Bearer {access_token}",
             "anthropic-beta": BETA_HEADER,
@@ -229,17 +245,67 @@ def _render_extra(extra):
     return f"{label:<{LABEL_WIDTH}}{round(util)}% of {symbol}{monthly}"
 
 
-def format_human(data, now=None):
-    """Render usage `data` as a multi-line human-readable string."""
+_PLAN_TOKEN_MAP = {"claude": "Claude", "max": "Max", "pro": "Pro"}
+
+
+def _format_plan_name(rate_limit_tier):
+    """Derive a friendly plan name from a rate_limit_tier string.
+
+    Strips a leading "default_", splits on "_", capitalizes the
+    well-known tokens (claude/max/pro), and leaves everything else
+    as-is so that "20x" stays "20x".
+    """
+    if rate_limit_tier.startswith("default_"):
+        rate_limit_tier = rate_limit_tier[len("default_"):]
+    tokens = rate_limit_tier.split("_")
+    pretty = [_PLAN_TOKEN_MAP.get(t, t) for t in tokens]
+    return " ".join(pretty)
+
+
+def _format_plan_header(profile):
+    """Build the one-line plan header from a profile response.
+
+    Returns "Plan: unknown" if the expected keys are missing, so a
+    surprise schema change degrades to a label rather than a crash.
+    """
+    try:
+        org = profile["organization"]
+        tier = org["rate_limit_tier"]
+        status = org["subscription_status"]
+        created_at = org["subscription_created_at"]
+    except (KeyError, TypeError):
+        return "Plan: unknown"
+    plan = _format_plan_name(tier)
+    iso = created_at[:-1] + "+00:00" if created_at.endswith("Z") else created_at
+    try:
+        date = datetime.fromisoformat(iso).date().isoformat()
+    except ValueError:
+        return "Plan: unknown"
+    if status == "active":
+        return f"Plan: {plan}  (active since {date})"
+    return f"Plan: {plan}  (status: {status}, since {date})"
+
+
+def format_human(data, profile=None, now=None):
+    """Render usage `data` as a multi-line human-readable string.
+
+    If `profile` is provided, prepend a plan-header line and a blank
+    line. When `profile` is None, the output matches the pre-header
+    behaviour exactly (callers that pass only `data` keep working).
+    """
     if now is None:
         now = datetime.now(timezone.utc)
-    lines = [
+    lines = []
+    if profile is not None:
+        lines.append(_format_plan_header(profile))
+        lines.append("")
+    lines.extend([
         _render_row("5-hour session", data.get("five_hour"), now),
         _render_row("7-day weekly", data.get("seven_day"), now),
         _render_row("  Sonnet (7d)", data.get("seven_day_sonnet"), now),
         _render_row("  Opus (7d)", data.get("seven_day_opus"), now),
         _render_extra(data.get("extra_usage")),
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -291,8 +357,15 @@ def main(argv=None):
                   file=sys.stderr)
             return EXIT_REFRESH_FAILED
 
+    def _fetch_all(token):
+        # Profile is only needed for the human header; skip it in JSON
+        # mode to avoid a spurious extra HTTP request per invocation.
+        data = fetch_usage(token)
+        profile = fetch_profile(token) if args.human else None
+        return data, profile
+
     try:
-        data = fetch_usage(creds["accessToken"])
+        data, profile = _fetch_all(creds["accessToken"])
     except AuthError:
         try:
             creds = refresh(creds_path)
@@ -301,7 +374,7 @@ def main(argv=None):
                   file=sys.stderr)
             return EXIT_REFRESH_FAILED
         try:
-            data = fetch_usage(creds["accessToken"])
+            data, profile = _fetch_all(creds["accessToken"])
         except AuthError as e:
             print(f"Authentication failed even after refresh. Re-auth.\n{e}",
                   file=sys.stderr)
@@ -314,7 +387,7 @@ def main(argv=None):
         return EXIT_NETWORK
 
     if args.human:
-        print(format_human(data))
+        print(format_human(data, profile=profile))
     else:
         print(json.dumps(data, indent=2))
     return EXIT_OK
