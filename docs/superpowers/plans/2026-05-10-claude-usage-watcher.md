@@ -68,9 +68,23 @@ with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
 
 Then `chmod +x bin/claude-usage`.
 
-- [ ] **Step 3: Create `tests/conftest.py`**
+- [ ] **Step 3: Create `tests/__init__.py`**
 
-This is the bridge that lets tests import the no-extension script as a module.
+Empty file. Required so `from tests.conftest import claude_usage` (used in
+the test file) can resolve `tests` as a package. (`spec_from_file_location`
+alone returns `None` for files without a `.py` suffix, which is why we
+need both this `__init__.py` *and* an explicit loader in `conftest.py`.)
+
+```python
+```
+
+(The file is intentionally empty.)
+
+- [ ] **Step 3b: Create `tests/conftest.py`**
+
+This is the bridge that lets tests import the no-extension script as a
+module. Because `bin/claude-usage` has no `.py` suffix, Python's default
+file-based loader does not match it; we pass an explicit `SourceFileLoader`.
 
 ```python
 """Test configuration: load bin/claude-usage as an importable module.
@@ -81,10 +95,14 @@ importlib to load it under the module name `claude_usage`.
 """
 import importlib.util
 import sys
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 _SCRIPT_PATH = Path(__file__).resolve().parent.parent / "bin" / "claude-usage"
-_spec = importlib.util.spec_from_file_location("claude_usage", _SCRIPT_PATH)
+_loader = SourceFileLoader("claude_usage", str(_SCRIPT_PATH))
+_spec = importlib.util.spec_from_file_location(
+    "claude_usage", str(_SCRIPT_PATH), loader=_loader
+)
 claude_usage = importlib.util.module_from_spec(_spec)
 sys.modules["claude_usage"] = claude_usage
 _spec.loader.exec_module(claude_usage)
@@ -136,7 +154,7 @@ Expected: `OK` with 1 test passed.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add .gitignore bin/claude-usage tests/conftest.py tests/test_claude_usage.py Makefile
+git add .gitignore bin/claude-usage tests/__init__.py tests/conftest.py tests/test_claude_usage.py Makefile
 git commit -m "scaffold: skeleton with importable bin/claude-usage and smoke test"
 ```
 
