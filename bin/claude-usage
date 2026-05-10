@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""claude-usage: print current Claude Max subscription usage as pretty JSON.
+
+Reads OAuth credentials from ~/.claude/.credentials.json (the same file
+Claude Code uses), refreshes the access token if expired, GETs
+https://api.anthropic.com/api/oauth/usage, and prints the response body
+with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
+"""
