@@ -7,7 +7,9 @@ import tempfile
 import time
 import unittest
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from textwrap import dedent
 from unittest.mock import patch, MagicMock
 from tests.conftest import claude_usage
 
@@ -274,6 +276,125 @@ class MainTest(unittest.TestCase):
             rc = claude_usage.main(["--credentials", str(self.path)])
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out.getvalue()), usage)
+
+
+class FormatHumanTest(unittest.TestCase):
+    def test_renders_full_response(self):
+        # now = 2026-05-09T22:00:00Z
+        # five_hour reset 5h later -> "in 5h 0m"
+        # seven_day reset 2d 2h later -> "in 2d 2h"
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        data = {
+            "five_hour": {"utilization": 10.0, "resets_at": "2026-05-10T03:00:00+00:00"},
+            "seven_day": {"utilization": 48.0, "resets_at": "2026-05-12T00:00:00+00:00"},
+            "seven_day_sonnet": {"utilization": 9.0, "resets_at": "2026-05-12T00:00:00+00:00"},
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": False, "monthly_limit": None,
+                            "used_credits": None, "utilization": None,
+                            "currency": None},
+        }
+        expected = (
+            "5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   in 5h 0m\n"
+            "7-day weekly     [██████████░░░░░░░░░░]  48%   in 2d 2h\n"
+            "  Sonnet (7d)    [██░░░░░░░░░░░░░░░░░░]   9%   in 2d 2h\n"
+            "  Opus (7d)      —                             no usage\n"
+            "Extra credits    disabled"
+        )
+        self.assertEqual(claude_usage.format_human(data, now=now), expected)
+
+    def test_extra_usage_enabled(self):
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        data = {
+            "five_hour": None,
+            "seven_day": None,
+            "seven_day_sonnet": None,
+            "seven_day_opus": None,
+            "extra_usage": {
+                "is_enabled": True,
+                "utilization": 30.0,
+                "monthly_limit": 100,
+                "used_credits": 30,
+                "currency": "USD",
+            },
+        }
+        out = claude_usage.format_human(data, now=now)
+        # Last line should be the extras line
+        last_line = out.splitlines()[-1]
+        self.assertEqual(last_line, "Extra credits    30% of $100")
+
+    def test_null_model_renders_no_usage(self):
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        data = {
+            "five_hour": None,
+            "seven_day": None,
+            "seven_day_sonnet": None,  # null model
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": False},
+        }
+        out = claude_usage.format_human(data, now=now)
+        sonnet_line = [ln for ln in out.splitlines() if "Sonnet" in ln][0]
+        self.assertIn("—", sonnet_line)        # em-dash bar
+        self.assertIn("no usage", sonnet_line)
+        self.assertNotIn("%", sonnet_line)
+
+    def test_reset_in_minutes_format(self):
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        # 45 minutes from now
+        resets_at = (now + timedelta(minutes=45)).isoformat()
+        result = claude_usage._humanize_reset(resets_at, now)
+        self.assertEqual(result, "in 45m")
+
+    def test_reset_past_renders_reset(self):
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        # 1 second in the past
+        resets_at = (now - timedelta(seconds=1)).isoformat()
+        result = claude_usage._humanize_reset(resets_at, now)
+        self.assertEqual(result, "reset")
+
+    def test_reset_in_days_format(self):
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        # 2 days, 19 hours from now
+        resets_at = (now + timedelta(days=2, hours=19, minutes=30)).isoformat()
+        result = claude_usage._humanize_reset(resets_at, now)
+        self.assertEqual(result, "in 2d 19h")
+
+
+class MainHumanFlagTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+        self.path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "tok",
+                "refreshToken": "ref",
+                "expiresAt": int(time.time() * 1000) + 3_600_000,
+            }
+        }))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _resp(self, body):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_human_flag_renders_text_not_json(self):
+        usage = {
+            "five_hour": {"utilization": 0.0, "resets_at": None},
+            "seven_day": {"utilization": 0.0, "resets_at": None},
+            "seven_day_sonnet": None,
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": False},
+        }
+        with patch("claude_usage.urllib.request.urlopen") as mock_open, \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            mock_open.return_value = self._resp(usage)
+            rc = claude_usage.main(["--credentials", str(self.path), "--human"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.getvalue().startswith("5-hour session"))
 
 
 if __name__ == "__main__":

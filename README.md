@@ -30,6 +30,14 @@ whatever you want with it.
 claude-usage | jq '.five_hour.utilization'
 ````
 
+For an at-a-glance text report with ASCII bars and humanized reset
+times instead of JSON, pass `--human`:
+
+````bash
+claude-usage --human
+# 5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   in 4h 52m
+````
+
 Authentication uses the OAuth credentials Claude Code already stores at
 `~/.claude/.credentials.json`. If the access token is expired, the tool
 refreshes it (and writes the rotated tokens back to the same file).
