@@ -359,6 +359,138 @@ class FormatHumanTest(unittest.TestCase):
         self.assertEqual(result, "resets in 2d 19h")
 
 
+class FormatPlanNameTest(unittest.TestCase):
+    def test_max_20x(self):
+        self.assertEqual(claude_usage._format_plan_name("default_claude_max_20x"), "Claude Max 20x")
+
+    def test_max_5x(self):
+        self.assertEqual(claude_usage._format_plan_name("default_claude_max_5x"), "Claude Max 5x")
+
+    def test_pro(self):
+        self.assertEqual(claude_usage._format_plan_name("default_claude_pro"), "Claude Pro")
+
+    def test_unknown_tier_passes_through(self):
+        self.assertEqual(claude_usage._format_plan_name("weird_unknown_tier"), "weird unknown tier")
+
+
+class FormatPlanHeaderTest(unittest.TestCase):
+    def test_active(self):
+        profile = {"organization": {
+            "rate_limit_tier": "default_claude_max_20x",
+            "subscription_status": "active",
+            "subscription_created_at": "2026-03-01T01:20:53.708212Z",
+        }}
+        self.assertEqual(
+            claude_usage._format_plan_header(profile),
+            "Plan: Claude Max 20x  (active since 2026-03-01)",
+        )
+
+    def test_inactive(self):
+        profile = {"organization": {
+            "rate_limit_tier": "default_claude_pro",
+            "subscription_status": "cancelled",
+            "subscription_created_at": "2026-03-01T01:20:53.708212Z",
+        }}
+        self.assertEqual(
+            claude_usage._format_plan_header(profile),
+            "Plan: Claude Pro  (status: cancelled, since 2026-03-01)",
+        )
+
+    def test_missing_keys_returns_unknown(self):
+        self.assertEqual(claude_usage._format_plan_header({}), "Plan: unknown")
+
+
+class FormatHumanWithProfileTest(unittest.TestCase):
+    def test_prepends_header_and_blank_line(self):
+        now = datetime(2026, 5, 9, 22, 0, 0, tzinfo=timezone.utc)
+        data = {
+            "five_hour": {"utilization": 10.0, "resets_at": "2026-05-10T03:00:00+00:00"},
+            "seven_day": {"utilization": 48.0, "resets_at": "2026-05-12T00:00:00+00:00"},
+            "seven_day_sonnet": None,
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": False},
+        }
+        profile = {"organization": {
+            "rate_limit_tier": "default_claude_max_20x",
+            "subscription_status": "active",
+            "subscription_created_at": "2026-03-01T01:20:53.708212Z",
+        }}
+        out = claude_usage.format_human(data, profile=profile, now=now)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "Plan: Claude Max 20x  (active since 2026-03-01)")
+        self.assertEqual(lines[1], "")
+        self.assertEqual(lines[2], "5-hour session   [██░░░░░░░░░░░░░░░░░░]  10%   resets in 5h 0m")
+
+
+class FetchProfileTest(unittest.TestCase):
+    def _resp(self, body):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_returns_parsed_json(self):
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._resp({"account": {"has_claude_max": True}})
+            result = claude_usage.fetch_profile("tok-abc")
+            self.assertTrue(result["account"]["has_claude_max"])
+
+    def test_401_raises_auth_error(self):
+        err = urllib.error.HTTPError(
+            url="x", code=401, msg="Unauthorized",
+            hdrs=None, fp=io.BytesIO(b"u"),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.AuthError):
+                claude_usage.fetch_profile("tok-abc")
+
+
+class MainHumanProfileTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+        self.path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "tok",
+                "refreshToken": "ref",
+                "expiresAt": int(time.time() * 1000) + 3_600_000,
+            }
+        }))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _resp(self, body):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_human_includes_plan_header(self):
+        usage = {
+            "five_hour": {"utilization": 10.0, "resets_at": "2026-05-10T03:00:00+00:00"},
+            "seven_day": {"utilization": 48.0, "resets_at": "2026-05-12T00:00:00+00:00"},
+            "seven_day_sonnet": None,
+            "seven_day_opus": None,
+            "extra_usage": {"is_enabled": False},
+        }
+        profile = {"organization": {
+            "rate_limit_tier": "default_claude_max_20x",
+            "subscription_status": "active",
+            "subscription_created_at": "2026-03-01T01:20:53.708212Z",
+        }}
+        # main calls fetch_usage then fetch_profile (or vice versa — check the impl).
+        # Order responses to match. If your impl fetches usage first:
+        responses = [self._resp(usage), self._resp(profile)]
+        with patch("claude_usage.urllib.request.urlopen", side_effect=responses), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = claude_usage.main(["--human", "--credentials", str(self.path)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.getvalue().startswith("Plan: "))
+
+
 class MainHumanFlagTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -389,12 +521,22 @@ class MainHumanFlagTest(unittest.TestCase):
             "seven_day_opus": None,
             "extra_usage": {"is_enabled": False},
         }
-        with patch("claude_usage.urllib.request.urlopen") as mock_open, \
+        profile = {"organization": {
+            "rate_limit_tier": "default_claude_max_20x",
+            "subscription_status": "active",
+            "subscription_created_at": "2026-03-01T01:20:53.708212Z",
+        }}
+        responses = [self._resp(usage), self._resp(profile)]
+        with patch("claude_usage.urllib.request.urlopen", side_effect=responses), \
              patch("sys.stdout", new_callable=io.StringIO) as out:
-            mock_open.return_value = self._resp(usage)
             rc = claude_usage.main(["--credentials", str(self.path), "--human"])
         self.assertEqual(rc, 0)
-        self.assertTrue(out.getvalue().startswith("5-hour session"))
+        # With profile header prepended, output starts with "Plan: "
+        # and the usage rows still appear after a blank line.
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith("Plan: "))
+        self.assertEqual(lines[1], "")
+        self.assertTrue(lines[2].startswith("5-hour session"))
 
 
 if __name__ == "__main__":
