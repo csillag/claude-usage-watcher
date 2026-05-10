@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""claude-usage: print current Claude Max subscription usage as pretty JSON.
+
+Reads OAuth credentials from ~/.claude/.credentials.json (the same file
+Claude Code uses), refreshes the access token if expired, GETs
+https://api.anthropic.com/api/oauth/usage, and prints the response body
+with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
+"""
+
+import argparse
+import json
+import os
+import stat
+import sys
+import tempfile
+import time
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+EXPIRY_SKEW_SECONDS = 60
+
+
+class CredentialsError(Exception):
+    """Raised when credentials cannot be loaded or parsed."""
+
+
+def load_credentials(path=DEFAULT_CREDENTIALS_PATH):
+    """Read the credentials file and return the claudeAiOauth dict.
+
+    Raises CredentialsError on missing file, malformed JSON, or missing
+    claudeAiOauth block.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise CredentialsError(
+            f"No credentials file at {path}. Run `claude` to authenticate first."
+        )
+    try:
+        raw = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise CredentialsError(f"Credentials file at {path} is malformed: {e}") from e
+    oauth = raw.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        raise CredentialsError(
+            f"Credentials file at {path} has no claudeAiOauth block."
+        )
+    return oauth
+
+
+def is_expired(creds, now=None):
+    """Return True if the access token is expired or expiring soon.
+
+    `expiresAt` in the credentials file is epoch milliseconds.
+    A 60-second skew margin avoids racing the token boundary.
+    """
+    if now is None:
+        now = time.time()
+    expires_at_ms = creds.get("expiresAt")
+    if expires_at_ms is None:
+        return True
+    return (expires_at_ms / 1000.0) - EXPIRY_SKEW_SECONDS <= now
+
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+BETA_HEADER = "oauth-2025-04-20"
+
+
+class AuthError(Exception):
+    """Raised on 401 from the usage endpoint (caller may retry after refresh)."""
+
+
+class UsageFetchError(Exception):
+    """Raised on any other HTTP or network error from the usage endpoint."""
+
+
+def fetch_usage(access_token):
+    """GET the usage endpoint and return the parsed JSON body."""
+    req = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "anthropic-beta": BETA_HEADER,
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise AuthError(f"401 Unauthorized: {e.read().decode('utf-8', 'replace')}") from e
+        raise UsageFetchError(f"HTTP {e.code}: {e.reason}") from e
+    except urllib.error.URLError as e:
+        raise UsageFetchError(f"Network error: {e.reason}") from e
+    return json.loads(body)
+
+
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
+
+
+class RefreshError(Exception):
+    """Raised when the refresh-token exchange fails."""
+
+
+def refresh(path=DEFAULT_CREDENTIALS_PATH):
+    """Refresh the access token and atomically rewrite the credentials file.
+
+    Returns the updated claudeAiOauth dict.
+    """
+    path = Path(path)
+    raw = json.loads(path.read_text())
+    creds = raw["claudeAiOauth"]
+    refresh_token = creds["refreshToken"]
+
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        REFRESH_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RefreshError(
+            f"Refresh failed: HTTP {e.code} {e.reason}: "
+            f"{e.read().decode('utf-8', 'replace')}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise RefreshError(f"Refresh failed: network: {e.reason}") from e
+
+    creds["accessToken"] = payload["access_token"]
+    creds["refreshToken"] = payload.get("refresh_token", refresh_token)
+    if "expires_at" in payload:
+        creds["expiresAt"] = int(payload["expires_at"])
+    else:
+        creds["expiresAt"] = int((time.time() + int(payload["expires_in"])) * 1000)
+    raw["claudeAiOauth"] = creds
+
+    _atomic_write(path, json.dumps(raw, indent=2))
+    return creds
+
+
+EXIT_OK = 0
+EXIT_NO_CREDS = 2
+EXIT_REFRESH_FAILED = 3
+EXIT_NETWORK = 4
+EXIT_AUTH_AFTER_REFRESH = 5
+
+
+def main(argv=None):
+    """Load credentials, refresh if needed, fetch usage, print JSON to stdout.
+
+    Returns exit code:
+      0 - success
+      2 - credentials missing or malformed
+      3 - token refresh failed
+      4 - network/HTTP error from usage endpoint
+      5 - authentication failed even after refresh
+    """
+    parser = argparse.ArgumentParser(
+        prog="claude-usage",
+        description="Print Claude Max subscription usage as pretty JSON.",
+    )
+    parser.add_argument(
+        "--credentials",
+        default=str(DEFAULT_CREDENTIALS_PATH),
+        help="Path to the Claude Code credentials JSON file.",
+    )
+    args = parser.parse_args(argv)
+    creds_path = Path(args.credentials)
+
+    try:
+        creds = load_credentials(creds_path)
+    except CredentialsError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_NO_CREDS
+
+    if is_expired(creds):
+        try:
+            creds = refresh(creds_path)
+        except RefreshError as e:
+            print(f"Token refresh failed. Re-auth via `claude /login`.\n{e}",
+                  file=sys.stderr)
+            return EXIT_REFRESH_FAILED
+
+    try:
+        data = fetch_usage(creds["accessToken"])
+    except AuthError:
+        try:
+            creds = refresh(creds_path)
+        except RefreshError as e:
+            print(f"Token refresh failed. Re-auth via `claude /login`.\n{e}",
+                  file=sys.stderr)
+            return EXIT_REFRESH_FAILED
+        try:
+            data = fetch_usage(creds["accessToken"])
+        except AuthError as e:
+            print(f"Authentication failed even after refresh. Re-auth.\n{e}",
+                  file=sys.stderr)
+            return EXIT_AUTH_AFTER_REFRESH
+        except UsageFetchError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_NETWORK
+    except UsageFetchError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_NETWORK
+
+    print(json.dumps(data, indent=2))
+    return EXIT_OK
+
+
+def _atomic_write(path, contents):
+    """Write `contents` to `path` atomically, preserving permissions."""
+    path = Path(path)
+    try:
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        existing_mode = 0o600
+    fd, tmp = tempfile.mkstemp(prefix=".credentials.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(contents)
+        os.chmod(tmp, existing_mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

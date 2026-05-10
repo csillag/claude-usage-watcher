@@ -1,0 +1,280 @@
+import io
+import json
+import os
+import stat
+import sys
+import tempfile
+import time
+import unittest
+import urllib.error
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+from tests.conftest import claude_usage
+
+
+class SmokeTest(unittest.TestCase):
+    def test_module_loads(self):
+        self.assertTrue(hasattr(claude_usage, "__doc__"))
+
+
+class LoadCredentialsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, payload):
+        self.path.write_text(json.dumps(payload))
+
+    def test_returns_oauth_block(self):
+        self._write({"claudeAiOauth": {"accessToken": "tok", "expiresAt": 1, "refreshToken": "r"}})
+        result = claude_usage.load_credentials(self.path)
+        self.assertEqual(result["accessToken"], "tok")
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(claude_usage.CredentialsError):
+            claude_usage.load_credentials(self.path)
+
+    def test_malformed_json_raises(self):
+        self.path.write_text("{not json")
+        with self.assertRaises(claude_usage.CredentialsError):
+            claude_usage.load_credentials(self.path)
+
+    def test_missing_oauth_block_raises(self):
+        self._write({"somethingElse": {}})
+        with self.assertRaises(claude_usage.CredentialsError):
+            claude_usage.load_credentials(self.path)
+
+
+class IsExpiredTest(unittest.TestCase):
+    def test_far_future_not_expired(self):
+        creds = {"expiresAt": int(time.time() * 1000) + 3_600_000}  # +1h
+        self.assertFalse(claude_usage.is_expired(creds))
+
+    def test_far_past_expired(self):
+        creds = {"expiresAt": int(time.time() * 1000) - 3_600_000}  # -1h
+        self.assertTrue(claude_usage.is_expired(creds))
+
+    def test_within_skew_margin_treated_as_expired(self):
+        # 30s in the future, but skew is 60s -> treat as expired
+        creds = {"expiresAt": int(time.time() * 1000) + 30_000}
+        self.assertTrue(claude_usage.is_expired(creds))
+
+    def test_just_past_skew_margin_not_expired(self):
+        # 90s in the future, beyond 60s skew -> not expired
+        creds = {"expiresAt": int(time.time() * 1000) + 90_000}
+        self.assertFalse(claude_usage.is_expired(creds))
+
+    def test_missing_expiry_treated_as_expired(self):
+        self.assertTrue(claude_usage.is_expired({}))
+
+
+class FetchUsageTest(unittest.TestCase):
+    def _mock_response(self, body_dict):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body_dict).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_returns_parsed_json(self):
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response({"five_hour": {"utilization": 7.0}})
+            result = claude_usage.fetch_usage("tok-abc")
+            self.assertEqual(result["five_hour"]["utilization"], 7.0)
+
+    def test_sends_bearer_and_beta_header(self):
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response({})
+            claude_usage.fetch_usage("tok-abc")
+            req = mock_open.call_args[0][0]
+            self.assertEqual(req.get_header("Authorization"), "Bearer tok-abc")
+            self.assertEqual(req.get_header("Anthropic-beta"), "oauth-2025-04-20")
+
+    def test_401_raises_auth_error(self):
+        err = urllib.error.HTTPError(
+            url="x", code=401, msg="Unauthorized",
+            hdrs=None, fp=io.BytesIO(b"unauthorized"),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.AuthError):
+                claude_usage.fetch_usage("tok-abc")
+
+    def test_500_raises_fetch_error(self):
+        err = urllib.error.HTTPError(
+            url="x", code=500, msg="Server",
+            hdrs=None, fp=io.BytesIO(b"boom"),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.UsageFetchError):
+                claude_usage.fetch_usage("tok-abc")
+
+    def test_url_error_raises_fetch_error(self):
+        with patch(
+            "claude_usage.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("no dns"),
+        ):
+            with self.assertRaises(claude_usage.UsageFetchError):
+                claude_usage.fetch_usage("tok-abc")
+
+
+class RefreshTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+        self.path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
+                "expiresAt": 1,
+                "scopes": ["user:inference"],
+                "subscriptionType": "max",
+            }
+        }))
+        os.chmod(self.path, 0o600)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _mock_response(self, body):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_writes_new_tokens_to_file(self):
+        new_body = {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        }
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response(new_body)
+            updated = claude_usage.refresh(self.path)
+        self.assertEqual(updated["accessToken"], "new-access")
+        on_disk = json.loads(self.path.read_text())["claudeAiOauth"]
+        self.assertEqual(on_disk["accessToken"], "new-access")
+        self.assertEqual(on_disk["refreshToken"], "new-refresh")
+
+    def test_preserves_0600_permissions(self):
+        new_body = {"access_token": "a", "refresh_token": "r", "expires_in": 60}
+        with patch("claude_usage.urllib.request.urlopen") as mock_open:
+            mock_open.return_value = self._mock_response(new_body)
+            claude_usage.refresh(self.path)
+        mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_refresh_failure_raises(self):
+        err = urllib.error.HTTPError(
+            url="x", code=400, msg="Bad",
+            hdrs=None, fp=io.BytesIO(b'{"error":"invalid_grant"}'),
+        )
+        with patch("claude_usage.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(claude_usage.RefreshError):
+                claude_usage.refresh(self.path)
+
+
+class MainTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ".credentials.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_creds(self, expires_at_ms):
+        self.path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "tok",
+                "refreshToken": "ref",
+                "expiresAt": expires_at_ms,
+            }
+        }))
+
+    def _resp(self, body):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode("utf-8")
+        resp.__enter__ = lambda self: self
+        resp.__exit__ = lambda self, *a: None
+        return resp
+
+    def test_happy_path_prints_pretty_json(self):
+        self._write_creds(int(time.time() * 1000) + 3_600_000)
+        usage = {"five_hour": {"utilization": 7.0}}
+        with patch("claude_usage.urllib.request.urlopen") as mock_open, \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            mock_open.return_value = self._resp(usage)
+            rc = claude_usage.main(["--credentials", str(self.path)])
+        self.assertEqual(rc, 0)
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed, usage)
+        self.assertIn('\n  "five_hour"', out.getvalue())
+
+    def test_missing_credentials_exits_2(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            rc = claude_usage.main(["--credentials", str(self.path)])
+        self.assertEqual(rc, 2)
+        self.assertIn("authenticate", err.getvalue().lower())
+
+    def test_401_triggers_refresh_and_retry(self):
+        self._write_creds(int(time.time() * 1000) + 3_600_000)
+        usage = {"seven_day": {"utilization": 1.0}}
+        responses = [
+            urllib.error.HTTPError(url="x", code=401, msg="u", hdrs=None,
+                                    fp=io.BytesIO(b"")),
+            self._resp({"access_token": "new", "refresh_token": "new-r",
+                        "expires_in": 60}),
+            self._resp(usage),
+        ]
+        def side_effect(req, *a, **kw):
+            r = responses.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with patch("claude_usage.urllib.request.urlopen", side_effect=side_effect), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = claude_usage.main(["--credentials", str(self.path)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), usage)
+
+    def test_401_after_refresh_exits_5(self):
+        self._write_creds(int(time.time() * 1000) + 3_600_000)
+        responses = [
+            urllib.error.HTTPError(url="x", code=401, msg="u", hdrs=None,
+                                    fp=io.BytesIO(b"")),
+            self._resp({"access_token": "new", "refresh_token": "new-r",
+                        "expires_in": 60}),
+            urllib.error.HTTPError(url="x", code=401, msg="u", hdrs=None,
+                                    fp=io.BytesIO(b"")),
+        ]
+        def side_effect(req, *a, **kw):
+            r = responses.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with patch("claude_usage.urllib.request.urlopen", side_effect=side_effect), \
+             patch("sys.stderr", new_callable=io.StringIO) as err:
+            rc = claude_usage.main(["--credentials", str(self.path)])
+        self.assertEqual(rc, 5)
+
+    def test_expired_token_refreshes_proactively(self):
+        self._write_creds(int(time.time() * 1000) - 3_600_000)  # expired
+        usage = {"five_hour": {"utilization": 0.0}}
+        responses = [
+            self._resp({"access_token": "new", "refresh_token": "new-r",
+                        "expires_in": 60}),
+            self._resp(usage),
+        ]
+        with patch("claude_usage.urllib.request.urlopen",
+                   side_effect=responses), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = claude_usage.main(["--credentials", str(self.path)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), usage)
+
+
+if __name__ == "__main__":
+    unittest.main()
