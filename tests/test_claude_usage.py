@@ -1,7 +1,9 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from tests.conftest import claude_usage
 
 
@@ -39,6 +41,26 @@ class LoadCredentialsTest(unittest.TestCase):
         self._write({"somethingElse": {}})
         with self.assertRaises(claude_usage.CredentialsError):
             claude_usage.load_credentials(self.path)
+
+
+class IsExpiredTest(unittest.TestCase):
+    def test_far_future_not_expired(self):
+        creds = {"expiresAt": int(time.time() * 1000) + 3_600_000}  # +1h
+        self.assertFalse(claude_usage.is_expired(creds))
+
+    def test_far_past_expired(self):
+        creds = {"expiresAt": int(time.time() * 1000) - 3_600_000}  # -1h
+        self.assertTrue(claude_usage.is_expired(creds))
+
+    def test_within_skew_margin_treated_as_expired(self):
+        # 30s in the future, but skew is 60s -> treat as expired
+        creds = {"expiresAt": int(time.time() * 1000) + 30_000}
+        self.assertTrue(claude_usage.is_expired(creds))
+
+    def test_just_past_skew_margin_not_expired(self):
+        # 90s in the future, beyond 60s skew -> not expired
+        creds = {"expiresAt": int(time.time() * 1000) + 90_000}
+        self.assertFalse(claude_usage.is_expired(creds))
 
 
 if __name__ == "__main__":

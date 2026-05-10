@@ -9,9 +9,11 @@ with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
 
 import json
 import os
+import time
 from pathlib import Path
 
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+EXPIRY_SKEW_SECONDS = 60
 
 
 class CredentialsError(Exception):
@@ -39,3 +41,17 @@ def load_credentials(path=DEFAULT_CREDENTIALS_PATH):
             f"Credentials file at {path} has no claudeAiOauth block."
         )
     return oauth
+
+
+def is_expired(creds, now=None):
+    """Return True if the access token is expired or expiring soon.
+
+    `expiresAt` in the credentials file is epoch milliseconds.
+    A 60-second skew margin avoids racing the token boundary.
+    """
+    if now is None:
+        now = time.time()
+    expires_at_ms = creds.get("expiresAt")
+    if expires_at_ms is None:
+        return True
+    return (expires_at_ms / 1000.0) - EXPIRY_SKEW_SECONDS <= now
