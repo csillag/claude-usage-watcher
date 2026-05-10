@@ -7,9 +7,11 @@ https://api.anthropic.com/api/oauth/usage, and prints the response body
 with json.dumps(indent=2). All errors go to stderr; only JSON to stdout.
 """
 
+import argparse
 import json
 import os
 import stat
+import sys
 import tempfile
 import time
 import urllib.request
@@ -147,6 +149,75 @@ def refresh(path=DEFAULT_CREDENTIALS_PATH):
     return creds
 
 
+EXIT_OK = 0
+EXIT_NO_CREDS = 2
+EXIT_REFRESH_FAILED = 3
+EXIT_NETWORK = 4
+EXIT_AUTH_AFTER_REFRESH = 5
+
+
+def main(argv=None):
+    """Load credentials, refresh if needed, fetch usage, print JSON to stdout.
+
+    Returns exit code:
+      0 - success
+      2 - credentials missing or malformed
+      3 - token refresh failed
+      4 - network/HTTP error from usage endpoint
+      5 - authentication failed even after refresh
+    """
+    parser = argparse.ArgumentParser(
+        prog="claude-usage",
+        description="Print Claude Max subscription usage as pretty JSON.",
+    )
+    parser.add_argument(
+        "--credentials",
+        default=str(DEFAULT_CREDENTIALS_PATH),
+        help="Path to the Claude Code credentials JSON file.",
+    )
+    args = parser.parse_args(argv)
+    creds_path = Path(args.credentials)
+
+    try:
+        creds = load_credentials(creds_path)
+    except CredentialsError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_NO_CREDS
+
+    if is_expired(creds):
+        try:
+            creds = refresh(creds_path)
+        except RefreshError as e:
+            print(f"Token refresh failed. Re-auth via `claude /login`.\n{e}",
+                  file=sys.stderr)
+            return EXIT_REFRESH_FAILED
+
+    try:
+        data = fetch_usage(creds["accessToken"])
+    except AuthError:
+        try:
+            creds = refresh(creds_path)
+        except RefreshError as e:
+            print(f"Token refresh failed. Re-auth via `claude /login`.\n{e}",
+                  file=sys.stderr)
+            return EXIT_REFRESH_FAILED
+        try:
+            data = fetch_usage(creds["accessToken"])
+        except AuthError as e:
+            print(f"Authentication failed even after refresh. Re-auth.\n{e}",
+                  file=sys.stderr)
+            return EXIT_AUTH_AFTER_REFRESH
+        except UsageFetchError as e:
+            print(str(e), file=sys.stderr)
+            return EXIT_NETWORK
+    except UsageFetchError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_NETWORK
+
+    print(json.dumps(data, indent=2))
+    return EXIT_OK
+
+
 def _atomic_write(path, contents):
     """Write `contents` to `path` atomically, preserving permissions."""
     path = Path(path)
@@ -166,3 +237,7 @@ def _atomic_write(path, contents):
         except OSError:
             pass
         raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())
